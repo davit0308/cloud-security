@@ -22,10 +22,25 @@ concurrency:
   group: scan-${{ github.ref }}
   cancel-in-progress: true
 
+# ─────────────────────────────────────────────────────────────────
+# Environment variables dùng chung cho tất cả jobs
+# Đặt ở đây để tất cả jobs đều thấy
+# ─────────────────────────────────────────────────────────────────
+env:
+  REPORTS_DIR: /home/scan/scanners/reports-ga   # Thư mục reports riêng cho GitHub Actions
+
+  # ── Tailscale IPs (cố định — không đổi khi restart máy) ──────────
+  ELK_IP:       "100.116.107.97"   # elk-vm
+  SCANNER_IP:   "100.112.127.63"   # scanner-vm
+  OPENSTACK_IP: "100.113.72.113"   # openstack/control-node
+
 jobs:
   # ─────────────────────────────────────────────────────────────────
   # JOB 1: Pre-deployment IaC Scan (Checkov + Trivy)
   # Chạy trên self-hosted runner = scanner-vm của bạn
+  # Giải thích: actions/checkout@v4 sẽ clone ĐÚNG branch đã trigger
+  # (generated/*id) về GITHUB_WORKSPACE = ~/actions-runner/_work/<repo>/<repo>/
+  # Checkov và Trivy đọc file .tf từ thư mục đó qua docker volume mount
   # ─────────────────────────────────────────────────────────────────
   pre-deployment-scan:
     name: Pre-deployment IaC Scan
@@ -41,10 +56,14 @@ jobs:
 
     steps:
       # ── 1. Checkout code ────────────────────────────────────────
+      # actions/checkout@v4 tự động clone đúng branch đã trigger workflow
+      # (GITHUB_REF_NAME = "generated/abc123" nếu push lên generated/abc123)
+      # File .tf sẽ xuất hiện tại: ~/actions-runner/_work/<repo>/<repo>/
       - name: Checkout IaC code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}   # Dùng PAT để có quyền push fixed branch sau
 
       # ── 2. Trích xuất metadata từ tên nhánh ────────────────────
       - name: Extract branch metadata
@@ -54,27 +73,36 @@ jobs:
           # Lấy ID từ tên nhánh: generated/abc12345 → abc12345
           BRANCH_ID="${BRANCH_NAME#generated/}"
           FIXED_BRANCH="fixed/${BRANCH_ID}"
-          echo "branch_id=${BRANCH_ID}"   >> $GITHUB_OUTPUT
+          echo "branch_id=${BRANCH_ID}"       >> $GITHUB_OUTPUT
           echo "fixed_branch=${FIXED_BRANCH}" >> $GITHUB_OUTPUT
           echo "branch_name=${BRANCH_NAME}"   >> $GITHUB_OUTPUT
           echo "Scanning branch: ${BRANCH_NAME}, ID: ${BRANCH_ID}"
+          echo "GITHUB_WORKSPACE = ${GITHUB_WORKSPACE}"
+          echo "Files in workspace:"
+          ls -la "${GITHUB_WORKSPACE}/"
 
       # ── 3. Chuẩn bị thư mục reports ────────────────────────────
+      # FIX: Tạo thư mục reports trong mỗi job để đảm bảo tồn tại
       - name: Prepare report directories
         run: |
           mkdir -p ${{ env.REPORTS_DIR }}/checkov
           mkdir -p ${{ env.REPORTS_DIR }}/trivy
-          # Xóa reports cũ để tránh nhầm lẫn
+          # Xóa reports cũ để tránh nhầm lẫn giữa các run
           rm -f ${{ env.REPORTS_DIR }}/checkov/*.json
           rm -f ${{ env.REPORTS_DIR }}/trivy/*.json
+          echo "Report dirs ready:"
+          ls -la ${{ env.REPORTS_DIR }}/
 
       # ── 4. Checkov scan ─────────────────────────────────────────
+      # Checkov đọc file .tf từ GITHUB_WORKSPACE (mount vào /target trong container)
       - name: Run Checkov (IaC static analysis)
         id: checkov
         run: |
           echo "=== CHECKOV SCAN ==="
-          # Tìm thư mục chứa file .tf hoặc Dockerfile
           SCAN_DIR="${GITHUB_WORKSPACE}"
+          echo "Scanning directory: ${SCAN_DIR}"
+          echo "Terraform files found:"
+          find "${SCAN_DIR}" -name "*.tf" | head -20
 
           docker run --rm \
             -v "${SCAN_DIR}:/target" \
@@ -84,12 +112,14 @@ jobs:
             --output json \
             --output-file-path /reports/ \
             --compact \
-            --soft-fail || true  # Không fail step — chúng ta tự đánh giá
+            --soft-fail || true   # soft-fail: không exit non-zero, tự đánh giá bên dưới
 
-          echo "Checkov scan hoàn thành"
+          echo "Checkov scan hoàn thành — reports:"
           ls -la ${{ env.REPORTS_DIR }}/checkov/
 
       # ── 5. Trivy scan ───────────────────────────────────────────
+      # FIX: Mount REPORTS_DIR/trivy vào /reports trong container
+      # và ghi output thẳng vào /reports để tránh permission issues
       - name: Run Trivy (IaC config scan)
         id: trivy
         run: |
@@ -98,19 +128,14 @@ jobs:
 
           docker run --rm \
             -v "${SCAN_DIR}:/target" \
+            -v "${{ env.REPORTS_DIR }}/trivy:/reports" \
             aquasec/trivy:latest \
             config /target \
             --format json \
-            --output /target/trivy_result.json \
-            --exit-code 0 || true
+            --output /reports/iac-terraform.json \
+            --exit-code 0 || true   # exit-code 0: không fail step dù có lỗi
 
-          # Copy kết quả vào reports dir
-          if [ -f "${SCAN_DIR}/trivy_result.json" ]; then
-            cp "${SCAN_DIR}/trivy_result.json" \
-               "${{ env.REPORTS_DIR }}/trivy/iac-terraform.json"
-            echo "Trivy report saved"
-          fi
-
+          echo "Trivy scan hoàn thành — reports:"
           ls -la ${{ env.REPORTS_DIR }}/trivy/
 
       # ── 6. Đánh giá kết quả scan ────────────────────────────────
@@ -125,6 +150,7 @@ jobs:
 
           # Parse Checkov result
           if [ -f "$CHECKOV_REPORT" ]; then
+            echo "Checkov report tìm thấy: $CHECKOV_REPORT"
             CHECKOV_FAILS=$(python3 -c "
           import json, sys
           try:
@@ -132,13 +158,17 @@ jobs:
               failed = data.get('results', {}).get('failed_checks', [])
               print(len(failed))
           except Exception as e:
+              sys.stderr.write(f'Parse error: {e}\n')
               print(0)
           " 2>/dev/null || echo 0)
+          else
+            echo "⚠️ Checkov report không tìm thấy tại: $CHECKOV_REPORT"
           fi
 
           # Parse Trivy result
           TRIVY_REPORT="${{ env.REPORTS_DIR }}/trivy/iac-terraform.json"
           if [ -f "$TRIVY_REPORT" ]; then
+            echo "Trivy report tìm thấy: $TRIVY_REPORT"
             TRIVY_FAILS=$(python3 -c "
           import json, sys
           try:
@@ -148,8 +178,11 @@ jobs:
                   total += len(r.get('Misconfigurations', []) or [])
               print(total)
           except Exception as e:
+              sys.stderr.write(f'Parse error: {e}\n')
               print(0)
           " 2>/dev/null || echo 0)
+          else
+            echo "⚠️ Trivy report không tìm thấy tại: $TRIVY_REPORT"
           fi
 
           TOTAL_FAILS=$((CHECKOV_FAILS + TRIVY_FAILS))
@@ -224,7 +257,6 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────
   # JOB 2: Triage & Remediation (nếu scan fail)
-  # Chạy trên scanner-vm, SSH sang elk-vm để trigger OPA + Dispatcher
   # ─────────────────────────────────────────────────────────────────
   triage-and-remediate:
     name: Triage & Remediation
@@ -235,13 +267,20 @@ jobs:
 
     outputs:
       fixed_branch: ${{ steps.create_fixed.outputs.fixed_branch }}
-      has_fixes: ${{ steps.create_fixed.outputs.has_fixes }}
+      has_fixes:    ${{ steps.create_fixed.outputs.has_fixes }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      # FIX: Tạo REPORTS_DIR trong job này (runner có thể chạy trên workspace mới)
+      - name: Prepare report directories
+        run: |
+          mkdir -p ${{ env.REPORTS_DIR }}/checkov
+          mkdir -p ${{ env.REPORTS_DIR }}/trivy
 
       # ── 1. Setup SSH key để kết nối elk-vm qua Tailscale ──────────
       - name: Setup SSH key for ELK VM (Tailscale)
@@ -249,27 +288,23 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Ghi private key từ Secret vào file
           echo "${{ secrets.ELK_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_elk
           chmod 600 ~/.ssh/id_ed25519_elk
 
-          # Thêm Tailscale IP của elk-vm vào known_hosts
-          # Dùng ssh-keyscan với Tailscale IP thay vì hostname
           ssh-keyscan -H 100.116.107.97 >> ~/.ssh/known_hosts 2>/dev/null
           echo "SSH key setup hoàn thành — elk: 100.116.107.97"
 
-      # ── 2. Trigger Triage qua SSH đến elk-vm (Tailscale) ───────────
+      # ── 2. Trigger Triage qua SSH đến elk-vm ──────────────────────
       - name: Trigger Triage & Remediation on ELK VM
         id: triage
         env:
           ELK_USER: ${{ secrets.ELK_SSH_USER }}
-          ELK_IP:   "100.116.107.97"          # Tailscale IP cố định của elk-vm
+          ELK_IP:   "100.116.107.97"
         run: |
           echo "=== KÍCH HOẠT TRIAGE TRÊN ELK VM (${ELK_IP}) ==="
           echo "Chờ 10 giây để Logstash đẩy dữ liệu vào Elasticsearch..."
           sleep 10
 
-          # SSH sang elk-vm qua Tailscale IP
           ssh -i ~/.ssh/id_ed25519_elk \
               -o StrictHostKeyChecking=no \
               -o ConnectTimeout=20 \
@@ -278,11 +313,11 @@ jobs:
 
           echo "Triage hoàn thành"
 
-      # ── 2. Tạo branch fixed/* với IaC đã được fix ───────────────
+      # ── 3. Tạo branch fixed/* với IaC đã được fix ──────────────
       - name: Create fixed branch with remediated IaC
         id: create_fixed
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           BRANCH_ID="${{ needs.pre-deployment-scan.outputs.branch_id }}"
           FIXED_BRANCH="fixed/${BRANCH_ID}"
@@ -292,11 +327,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Tạo branch fixed từ branch generated hiện tại
           git checkout -b "$FIXED_BRANCH"
 
-          # Kiểm tra có PR fixes nào được tạo bởi Dispatcher không
-          # Dispatcher đã commit fixes vào workspace, cần copy về đây
           WORKSPACE_FIX="/tmp/iac-fixes-${BRANCH_ID}"
 
           if [ -d "$WORKSPACE_FIX" ]; then
@@ -336,18 +368,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.triage-and-remediate.outputs.fixed_branch }}
+          token: ${{ secrets.GH_PAT }}
+
+      # FIX: Tạo REPORTS_DIR trong job này
+      - name: Prepare report directories
+        run: |
+          RESCAN_DIR="/tmp/rescan-reports-${{ needs.triage-and-remediate.outputs.fixed_branch }}"
+          mkdir -p "$RESCAN_DIR/checkov"
+          echo "RESCAN_DIR=${RESCAN_DIR}" >> $GITHUB_ENV
 
       - name: Re-run Checkov on fixed IaC
         id: rescan
         run: |
           echo "=== RE-SCAN NHÁNH FIXED ==="
-
-          RESCAN_DIR="/tmp/rescan-reports"
-          mkdir -p "$RESCAN_DIR/checkov"
+          echo "Files trong workspace:"
+          ls -la "${GITHUB_WORKSPACE}/"
 
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/target" \
-            -v "$RESCAN_DIR/checkov:/reports" \
+            -v "${{ env.RESCAN_DIR }}/checkov:/reports" \
             bridgecrew/checkov:latest \
             -d /target \
             --output json \
@@ -358,9 +397,9 @@ jobs:
           CHECKOV_FAILS=$(python3 -c "
           import json
           try:
-              data = json.load(open('$RESCAN_DIR/checkov/results_json.json'))
+              data = json.load(open('${{ env.RESCAN_DIR }}/checkov/results_json.json'))
               print(len(data.get('results', {}).get('failed_checks', [])))
-          except:
+          except Exception as e:
               print(0)
           " 2>/dev/null || echo 0)
 
@@ -368,27 +407,40 @@ jobs:
 
           if [ "$CHECKOV_FAILS" -eq 0 ]; then
             echo "scan_passed=true"  >> $GITHUB_OUTPUT
-            echo "✅ Re-scan PASSED"
+            echo "✅ Re-scan PASSED — IaC đã clean"
           else
             echo "scan_passed=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Re-scan FAILED — còn ${CHECKOV_FAILS} lỗi"
+            echo "⚠️ Re-scan FAILED — còn ${CHECKOV_FAILS} lỗi chưa fix"
           fi
 
   # ─────────────────────────────────────────────────────────────────
   # JOB 4: Merge vào main (chỉ khi scan sạch)
+  #
+  # FIX: Thêm triage-and-remediate vào needs để job không bị bỏ qua
+  # khi verify-fixes bị skip (trường hợp scan pass ngay từ đầu)
+  #
+  # Logic merge:
+  #   - Scan ban đầu PASS  → merge thẳng generated/*id vào main
+  #   - Scan fail nhưng fix xong và re-scan PASS → merge fixed/*id vào main
   # ─────────────────────────────────────────────────────────────────
   merge-to-main:
     name: Merge Validated IaC to main
     runs-on: self-hosted
     needs:
       - pre-deployment-scan
+      - triage-and-remediate   # FIX: thêm job này vào needs
       - verify-fixes
-    # Merge nếu: scan ban đầu pass (không cần fix) HOẶC re-scan sau fix pass
+    # FIX: Dùng needs.<job>.result thay vì chỉ dựa vào outputs
+    # 'skipped' xảy ra khi scan pass ngay → verify-fixes không chạy → vẫn OK để merge
     if: |
       always() &&
+      !failure() &&
       (
         needs.pre-deployment-scan.outputs.scan_passed == 'true' ||
-        needs.verify-fixes.outputs.rescan_passed == 'true'
+        (
+          needs.verify-fixes.result == 'success' &&
+          needs.verify-fixes.outputs.rescan_passed == 'true'
+        )
       )
     timeout-minutes: 10
 
@@ -397,7 +449,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}   # Cần PAT để merge vào protected branch
+          token: ${{ secrets.GH_PAT }}
 
       - name: Configure git
         run: |
@@ -413,13 +465,14 @@ jobs:
           if [ "$SCAN_PASSED" = "true" ]; then
             # Scan ban đầu đã pass — merge thẳng nhánh generated
             SOURCE_BRANCH="generated/${BRANCH_ID}"
+            echo "→ Scan pass ngay, merge generated/${BRANCH_ID}"
           else
             # Đã fix xong — merge nhánh fixed
             SOURCE_BRANCH="fixed/${BRANCH_ID}"
+            echo "→ Đã fix, merge fixed/${BRANCH_ID}"
           fi
 
           echo "source_branch=${SOURCE_BRANCH}" >> $GITHUB_OUTPUT
-          echo "Sẽ merge ${SOURCE_BRANCH} vào main"
 
       - name: Merge into main
         env:
@@ -462,7 +515,6 @@ jobs:
       - name: Cleanup feature branches
         run: |
           BRANCH_ID="${{ needs.pre-deployment-scan.outputs.branch_id }}"
-          # Xóa nhánh generated và fixed sau khi merge thành công
           git push origin --delete "generated/${BRANCH_ID}" || true
           git push origin --delete "fixed/${BRANCH_ID}"     || true
           echo "Đã xóa nhánh tạm: generated/${BRANCH_ID}, fixed/${BRANCH_ID}"
@@ -475,11 +527,16 @@ jobs:
     runs-on: self-hosted
     needs:
       - pre-deployment-scan
+      - triage-and-remediate
       - verify-fixes
     if: |
       always() &&
       needs.pre-deployment-scan.outputs.scan_passed == 'false' &&
-      needs.verify-fixes.outputs.rescan_passed == 'false'
+      (
+        needs.verify-fixes.result == 'failure' ||
+        needs.verify-fixes.result == 'skipped' ||
+        needs.verify-fixes.outputs.rescan_passed == 'false'
+      )
     steps:
       - name: Notify Slack — pipeline blocked
         env:
@@ -491,14 +548,3 @@ jobs:
             -d "{
               \"text\": \":rotating_light: IaC \`${BRANCH_ID}\` BỊ CHẶN — auto-fix không thể giải quyết tất cả lỗi. Cần review thủ công. <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Xem chi tiết>\"
             }" || true
-
-# ─────────────────────────────────────────────────────────────────
-# Environment variables dùng chung cho tất cả jobs
-# ─────────────────────────────────────────────────────────────────
-env:
-  REPORTS_DIR: /home/scan/scanners/reports-ga   # Thư mục reports riêng cho GitHub Actions
-
-  # ── Tailscale IPs (cố định — không đổi khi restart máy) ──────────
-  ELK_IP:       "100.116.107.97"   # elk-vm
-  SCANNER_IP:   "100.112.127.63"   # scanner-vm
-  OPENSTACK_IP: "100.113.72.113"   # openstack/control-node
