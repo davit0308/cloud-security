@@ -317,18 +317,13 @@ jobs:
             echo "Fix files tìm thấy tại: $WORKSPACE_FIX"
             cp -r "$WORKSPACE_FIX/." .
             git add -A
-            git diff --cached --quiet || git commit -m \
-              "fix(iac): auto-remediate findings for ${BRANCH_ID}
-
-Fixes applied by pipeline dispatcher:
-- Checkov fails: ${{ needs.pre-deployment-scan.outputs.checkov_fails }}
-- Trivy fails:   ${{ needs.pre-deployment-scan.outputs.trivy_fails }}
-[skip ci]"
+            CHECKOV_FAILS="${{ needs.pre-deployment-scan.outputs.checkov_fails }}"
+            TRIVY_FAILS="${{ needs.pre-deployment-scan.outputs.trivy_fails }}"
+            git diff --cached --quiet || git commit -m "fix(iac): auto-remediate findings for ${BRANCH_ID} | checkov=${CHECKOV_FAILS} trivy=${TRIVY_FAILS} [skip ci]"
             echo "has_fixes=true" >> $GITHUB_OUTPUT
           else
             echo "Không có fix tự động — tạo branch trống để track"
-            git commit --allow-empty -m \
-              "chore: placeholder fixed branch for ${BRANCH_ID} [skip ci]"
+            git commit --allow-empty -m "chore: placeholder fixed branch for ${BRANCH_ID} [skip ci]"
             echo "has_fixes=false" >> $GITHUB_OUTPUT
           fi
 
@@ -473,15 +468,8 @@ Fixes applied by pipeline dispatcher:
           git checkout main
           git pull origin main
 
-          git merge \
-            --no-ff \
-            "origin/${SOURCE}" \
-            -m "feat(iac): validated IaC for request ${BRANCH_ID}
-
-Source : ${SOURCE}
-Scan   : PASSED
-Run    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-[skip ci]"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git merge --no-ff "origin/${SOURCE}" -m "feat(iac): validated IaC for ${BRANCH_ID} | src=${SOURCE} run=${RUN_URL} [skip ci]"
 
           git push origin main
           echo "✅ Merged ${SOURCE} → main"
