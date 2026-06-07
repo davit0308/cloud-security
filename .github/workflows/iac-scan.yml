@@ -266,6 +266,7 @@ jobs:
           ELK_USER: ${{ secrets.ELK_SSH_USER }}
         run: |
           DRY_RUN_VALUE="${{ github.event.inputs.dry_run || 'true' }}"
+          BRANCH_ID_VALUE="${{ needs.pre-deployment-scan.outputs.branch_id }}"
           echo "=== KÍCH HOẠT TRIAGE TRÊN ELK VM (${{ env.ELK_IP }}) ==="
           echo "DRY_RUN mode: ${DRY_RUN_VALUE}"
           echo "Chờ 10 giây để Logstash đẩy dữ liệu vào Elasticsearch..."
@@ -279,12 +280,17 @@ jobs:
               "${ELK_USER}@${{ env.ELK_IP }}" \
               "cd ~/elk-stack/pipeline \
                && source .env \
-               && DRY_RUN=${DRY_RUN_VALUE} timeout 300 python3 run_awsgoat_triage.py"
+               && DRY_RUN=${DRY_RUN_VALUE} \
+               && BRANCH_ID=${BRANCH_ID_VALUE} \
+               && timeout 300 python3 run_awsgoat_triage.py"
 
           echo "Triage hoàn thành"
 
-      # ── Tạo nhánh fixed/* với IaC đã fix ────────────────────────
-      - name: Create fixed branch with remediated IaC
+      # ── Kiểm tra nhánh fixed/* do dispatcher đã push ───────────
+      # Dispatcher (elk-vm) tự clone generated/*, áp dụng fix,
+      # và push lên fixed/* trực tiếp qua pr_creator.py.
+      # Job này chỉ cần kiểm tra xem nhánh đó có tồn tại không.
+      - name: Check fixed branch created by dispatcher
         id: create_fixed
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
@@ -292,45 +298,28 @@ jobs:
           BRANCH_ID="${{ needs.pre-deployment-scan.outputs.branch_id }}"
           FIXED_BRANCH="fixed/${BRANCH_ID}"
 
-          echo "=== TẠO NHÁNH ${FIXED_BRANCH} ==="
+          echo "=== KIỂM TRA NHÁNH ${FIXED_BRANCH} ==="
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin 2>/dev/null || true
 
-          # ── FIX: Xóa branch cũ trên remote trước khi tạo mới ───
-          # Tránh lỗi non-fast-forward khi branch đã tồn tại từ lần
-          # chạy trước. fixed/* là nhánh tạm — xóa và tạo lại là đúng.
-          echo "Xóa branch cũ nếu tồn tại..."
-          git push origin --delete "${FIXED_BRANCH}" 2>/dev/null && \
-            echo "Đã xóa remote branch cũ: ${FIXED_BRANCH}" || \
-            echo "Branch chưa tồn tại trên remote — tiếp tục"
-          git branch -D "${FIXED_BRANCH}" 2>/dev/null || true
-          # ────────────────────────────────────────────────────────
+          # Kiểm tra xem dispatcher đã push fixed branch chưa
+          if git ls-remote --exit-code --heads origin "${FIXED_BRANCH}" > /dev/null 2>&1; then
+            echo "✅ Dispatcher đã tạo ${FIXED_BRANCH} — có fix thực sự"
+            echo "has_fixes=true"  >> $GITHUB_OUTPUT
 
-          git checkout -b "$FIXED_BRANCH"
-
-          # Dispatcher ghi IaC fix vào /tmp/iac-fixes-{id} trên scanner-vm
-          # (cùng máy với runner self-hosted)
-          WORKSPACE_FIX="/tmp/iac-fixes-${BRANCH_ID}"
-
-          if [ -d "$WORKSPACE_FIX" ] && [ "$(ls -A $WORKSPACE_FIX)" ]; then
-            echo "Fix files tìm thấy tại: $WORKSPACE_FIX"
-            cp -r "$WORKSPACE_FIX/." .
-            git add -A
-            CHECKOV_FAILS="${{ needs.pre-deployment-scan.outputs.checkov_fails }}"
-            TRIVY_FAILS="${{ needs.pre-deployment-scan.outputs.trivy_fails }}"
-            git diff --cached --quiet || git commit -m "fix(iac): auto-remediate findings for ${BRANCH_ID} | checkov=${CHECKOV_FAILS} trivy=${TRIVY_FAILS} [skip ci]"
-            echo "has_fixes=true" >> $GITHUB_OUTPUT
+            # Kiểm tra nhánh có commit thực sự (không phải placeholder)
+            COMMIT_MSG=$(git log "origin/${FIXED_BRANCH}" -1 --format="%s" 2>/dev/null || echo "")
+            echo "Commit message: ${COMMIT_MSG}"
+            if echo "$COMMIT_MSG" | grep -q "placeholder"; then
+              echo "⚠️ Branch là placeholder — không có fix thực sự"
+              echo "has_fixes=false" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "Không có fix tự động — tạo branch trống để track"
-            git commit --allow-empty -m "chore: placeholder fixed branch for ${BRANCH_ID} [skip ci]"
+            echo "ℹ️ Dispatcher chưa tạo ${FIXED_BRANCH} — không có fix tự động"
             echo "has_fixes=false" >> $GITHUB_OUTPUT
           fi
 
-          # Force push để ghi đè nếu vẫn còn conflict sau khi xóa
-          git push origin "$FIXED_BRANCH" --force
           echo "fixed_branch=${FIXED_BRANCH}" >> $GITHUB_OUTPUT
-          echo "✅ Pushed ${FIXED_BRANCH} lên remote"
 
   # ═══════════════════════════════════════════════════════════════
   # JOB 3 — Verify Fixes: Re-scan nhánh fixed/*
