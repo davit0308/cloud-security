@@ -343,14 +343,16 @@ jobs:
           ref: ${{ needs.triage-and-remediate.outputs.fixed_branch }}
           token: ${{ secrets.GH_PAT }}
 
-      # FIX: Dùng thư mục riêng cho rescan, tránh đè lên reports của Job 1
       - name: Prepare rescan report directory
         run: |
-          RESCAN_DIR="/tmp/rescan-reports-${{ needs.triage-and-remediate.outputs.fixed_branch }}"
-          # Thay / thành - để dùng làm tên thư mục
-          RESCAN_DIR="${RESCAN_DIR//\//-}"
+          # Lấy branch name, thay / thành - để dùng làm tên thư mục con
+          # Ví dụ: fixed/test-001 → fixed-test-001
+          BRANCH_SAFE="${{ needs.triage-and-remediate.outputs.fixed_branch }}"
+          BRANCH_SAFE="${BRANCH_SAFE//\//-}"
+          RESCAN_DIR="/tmp/rescan-${BRANCH_SAFE}"
           mkdir -p "${RESCAN_DIR}/checkov"
           echo "RESCAN_DIR=${RESCAN_DIR}" >> $GITHUB_ENV
+          echo "Rescan dir: ${RESCAN_DIR}"
 
       - name: Re-run Checkov on fixed IaC
         id: rescan
