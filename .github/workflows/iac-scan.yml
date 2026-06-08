@@ -280,8 +280,8 @@ jobs:
               "${ELK_USER}@${{ env.ELK_IP }}" \
               "cd ~/elk-stack/pipeline \
                && source .env \
-               && DRY_RUN=${DRY_RUN_VALUE} \
-               && BRANCH_ID=${BRANCH_ID_VALUE} \
+               && export DRY_RUN=${DRY_RUN_VALUE} \
+               && export BRANCH_ID=${BRANCH_ID_VALUE} \
                && timeout 300 python3 run_awsgoat_triage.py"
 
           echo "Triage hoàn thành"
