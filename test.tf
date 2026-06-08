@@ -61,7 +61,7 @@ resource "aws_security_group" "aws_web_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["10.0.0.0/8"]  # AUTO-FIXED: restrict SSH — replace with actual trusted CIDR
   }
 
   # ❌ LỖI CỐ Ý 2: Mở toang cổng RDP (3389) cho toàn Internet.
