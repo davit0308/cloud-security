@@ -27,16 +27,18 @@ on:
 
 env:
   REPORTS_DIR: /home/scan/scanners/reports-ga
-  ELK_IP: 100.116.107.97
-  SCANNER_IP: 100.112.127.63
-  OPENSTACK_IP: 100.113.72.113
+
+  # Existing GitHub Secrets
+  ELK_IP: ${{ secrets.ELK_IP }}
+  SCANNER_IP: ${{ secrets.SCANNER_VM_IP }}
+  OPENSTACK_IP: ${{ secrets.OPENSTACK_IP }}
 
   # AWS deploy
   TERRAFORM_AWS_DIR: aws
   TF_STATE_PATH: /home/scan/scanners/tfstate/aws/terraform.tfstate
 
   # AegisZero token exchange
-  TAILSCALE_AIO_IP: 100.113.72.113
+  TAILSCALE_AIO_IP: ${{ secrets.OPENSTACK_IP }}
   RUNNER_CLIENT_ID: aegis-infra-runner
 
 permissions:
@@ -119,7 +121,7 @@ jobs:
             echo '{"results": {"failed_checks": []}}' > "$CHECKOV_JSON"
           fi
 
-          CHECKOV_FAILS=$(jq '[.. | objects | select(has("check_id"))] | length' "$CHECKOV_JSON" 2>/dev/null || echo 0)
+          CHECKOV_FAILS=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo 0)
 
           echo "Checkov fails: $CHECKOV_FAILS"
           echo "checkov_fails=$CHECKOV_FAILS" >> "$GITHUB_OUTPUT"
@@ -149,9 +151,24 @@ jobs:
       - name: Send scan reports to ELK
         continue-on-error: true
         env:
-          ELK_USER: ${{ secrets.ELK_USER }}
-          ELK_SSH_KEY: ${{ secrets.ELK_SSH_KEY }}
+          ELK_USER: ${{ secrets.ELK_SSH_USER }}
+          ELK_SSH_KEY: ${{ secrets.ELK_SSH_PRIVATE_KEY }}
         run: |
+          if [ -z "$ELK_IP" ]; then
+            echo "❌ ELK_IP is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
+          if [ -z "$ELK_USER" ]; then
+            echo "❌ ELK_SSH_USER is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
+          if [ -z "$ELK_SSH_KEY" ]; then
+            echo "❌ ELK_SSH_PRIVATE_KEY is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$ELK_SSH_KEY" > ~/.ssh/id_ed25519_elk
           chmod 600 ~/.ssh/id_ed25519_elk
@@ -238,8 +255,18 @@ jobs:
 
       - name: Prepare SSH to ELK
         env:
-          ELK_SSH_KEY: ${{ secrets.ELK_SSH_KEY }}
+          ELK_SSH_KEY: ${{ secrets.ELK_SSH_PRIVATE_KEY }}
         run: |
+          if [ -z "$ELK_IP" ]; then
+            echo "❌ ELK_IP is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
+          if [ -z "$ELK_SSH_KEY" ]; then
+            echo "❌ ELK_SSH_PRIVATE_KEY is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$ELK_SSH_KEY" > ~/.ssh/id_ed25519_elk
           chmod 600 ~/.ssh/id_ed25519_elk
@@ -248,8 +275,13 @@ jobs:
 
       - name: Run triage on ELK VM
         env:
-          ELK_USER: ${{ secrets.ELK_USER }}
+          ELK_USER: ${{ secrets.ELK_SSH_USER }}
         run: |
+          if [ -z "$ELK_USER" ]; then
+            echo "❌ ELK_SSH_USER is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
           DRY_RUN_VALUE="${{ github.event.inputs.dry_run || 'false' }}"
           BRANCH_ID_VALUE="${{ needs.pre-deployment-scan.outputs.branch_id }}"
 
@@ -365,7 +397,7 @@ jobs:
             echo '{"results": {"failed_checks": []}}' > "$CHECKOV_FIXED_JSON"
           fi
 
-          CHECKOV_FAILS_AFTER=$(jq '[.. | objects | select(has("check_id"))] | length' "$CHECKOV_FIXED_JSON" 2>/dev/null || echo 0)
+          CHECKOV_FAILS_AFTER=$(jq '.results.failed_checks | length' "$CHECKOV_FIXED_JSON" 2>/dev/null || echo 0)
 
           echo "Checkov fails after fix: $CHECKOV_FAILS_AFTER"
           echo "checkov_fails_after=$CHECKOV_FAILS_AFTER" >> "$GITHUB_OUTPUT"
@@ -502,7 +534,7 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
 
-      TAILSCALE_AIO_IP: "100.113.72.113"
+      TAILSCALE_AIO_IP: ${{ secrets.OPENSTACK_IP }}
       RUNNER_CLIENT_ID: "aegis-infra-runner"
       RUNNER_CLIENT_SECRET: ${{ secrets.RUNNER_CLIENT_SECRET }}
 
@@ -535,6 +567,16 @@ jobs:
 
       - name: Get AWS credentials from AegisZero STS
         run: |
+          if [ -z "$RUNNER_CLIENT_SECRET" ]; then
+            echo "❌ RUNNER_CLIENT_SECRET is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
+          if [ ! -f "scripts/get_aws_credentials_ci.sh" ]; then
+            echo "❌ scripts/get_aws_credentials_ci.sh not found."
+            exit 1
+          fi
+
           chmod +x scripts/get_aws_credentials_ci.sh
           scripts/get_aws_credentials_ci.sh
 
@@ -589,6 +631,7 @@ jobs:
           unset AWS_ACCESS_KEY_ID || true
           unset AWS_SECRET_ACCESS_KEY || true
           unset AWS_SESSION_TOKEN || true
+          unset RUNNER_CLIENT_SECRET || true
           echo "Sensitive env cleaned"
 
   report-failure:
@@ -615,12 +658,12 @@ jobs:
     steps:
       - name: Notify Slack
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           BRANCH_ID="${{ needs.pre-deployment-scan.outputs.branch_id }}"
 
           if [ -z "$SLACK_WEBHOOK" ]; then
-            echo "SLACK_WEBHOOK is empty, skip notification"
+            echo "SLACK_WEBHOOK_URL is empty, skip notification"
             exit 0
           fi
 
