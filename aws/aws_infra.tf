@@ -96,6 +96,13 @@ resource "aws_instance" "app_node" {
     Environment = "staging"
     ManagedBy   = "Aegis-Portal-Terraform"
   }
+
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 }
 
 # ── IAM INSTANCE PROFILE ──────────────────────────────────────────────────────
