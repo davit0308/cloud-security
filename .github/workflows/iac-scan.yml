@@ -57,6 +57,15 @@ jobs:
       fixed_branch: ${{ steps.branch.outputs.fixed_branch }}
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          echo "Pre-clean workspace: $GITHUB_WORKSPACE"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-fixed-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/.checkov" || true
+          rm -rf "$GITHUB_WORKSPACE/.external_modules" || true
+
       - name: Checkout generated branch
         uses: actions/checkout@v4
         with:
@@ -94,17 +103,19 @@ jobs:
         continue-on-error: true
         run: |
           CHECKOV_JSON="$REPORTS_DIR/checkov/checkov-${{ steps.branch.outputs.branch_id }}.json"
+          CHECKOV_LOG="$REPORTS_DIR/checkov/checkov-${{ steps.branch.outputs.branch_id }}.log"
+
+          rm -f "$CHECKOV_JSON" "$CHECKOV_LOG"
 
           docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/target" \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/target:ro" \
             bridgecrew/checkov:latest \
             -d /target \
             --output json \
-            --output-file-path /target/checkov-result.json || true
+            > "$CHECKOV_JSON" 2> "$CHECKOV_LOG" || true
 
-          if [ -f "${GITHUB_WORKSPACE}/checkov-result.json" ]; then
-            cp "${GITHUB_WORKSPACE}/checkov-result.json" "$CHECKOV_JSON"
-          else
+          if [ ! -s "$CHECKOV_JSON" ]; then
             echo '{"results": {"failed_checks": []}}' > "$CHECKOV_JSON"
           fi
 
@@ -119,12 +130,14 @@ jobs:
         run: |
           TRIVY_JSON="$REPORTS_DIR/trivy/trivy-${{ steps.branch.outputs.branch_id }}.json"
 
+          rm -f "$TRIVY_JSON"
+
           trivy config \
             --format json \
             --output "$TRIVY_JSON" \
             "$GITHUB_WORKSPACE" || true
 
-          if [ ! -f "$TRIVY_JSON" ]; then
+          if [ ! -s "$TRIVY_JSON" ]; then
             echo '{"Results":[]}' > "$TRIVY_JSON"
           fi
 
@@ -208,6 +221,15 @@ jobs:
       fixed_branch: ${{ steps.check-fixed.outputs.fixed_branch }}
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          echo "Pre-clean workspace: $GITHUB_WORKSPACE"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-fixed-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/.checkov" || true
+          rm -rf "$GITHUB_WORKSPACE/.external_modules" || true
+
       - name: Checkout generated branch
         uses: actions/checkout@v4
         with:
@@ -254,20 +276,22 @@ jobs:
       - name: Check fixed branch created by dispatcher
         id: check-fixed
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           BRANCH_ID="${{ needs.pre-deployment-scan.outputs.branch_id }}"
           FIXED_BRANCH="fixed/${BRANCH_ID}"
 
           echo "=== KIỂM TRA NHÁNH ${FIXED_BRANCH} ==="
 
+          git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch origin 2>/dev/null || true
 
           if git ls-remote --exit-code --heads origin "${FIXED_BRANCH}" > /dev/null 2>&1; then
             echo "✅ Dispatcher đã tạo ${FIXED_BRANCH} — có fix thực sự"
             echo "has_fixes=true" >> "$GITHUB_OUTPUT"
 
-            COMMIT_MSG=$(git log "origin/${FIXED_BRANCH}" -1 --format="%s" 2>/dev/null || echo "")
+            git fetch origin "${FIXED_BRANCH}:${FIXED_BRANCH}" || true
+            COMMIT_MSG=$(git log "${FIXED_BRANCH}" -1 --format="%s" 2>/dev/null || echo "")
             echo "Commit message: ${COMMIT_MSG}"
 
             if echo "$COMMIT_MSG" | grep -qi "placeholder"; then
@@ -297,6 +321,15 @@ jobs:
       trivy_fails_after: ${{ steps.verify-result.outputs.trivy_fails_after }}
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          echo "Pre-clean workspace: $GITHUB_WORKSPACE"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-fixed-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/.checkov" || true
+          rm -rf "$GITHUB_WORKSPACE/.external_modules" || true
+
       - name: Checkout fixed branch
         uses: actions/checkout@v4
         with:
@@ -316,17 +349,19 @@ jobs:
           mkdir -p "$REPORTS_DIR/checkov"
 
           CHECKOV_FIXED_JSON="$REPORTS_DIR/checkov/checkov-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.json"
+          CHECKOV_FIXED_LOG="$REPORTS_DIR/checkov/checkov-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.log"
+
+          rm -f "$CHECKOV_FIXED_JSON" "$CHECKOV_FIXED_LOG"
 
           docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/target" \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/target:ro" \
             bridgecrew/checkov:latest \
             -d /target \
             --output json \
-            --output-file-path /target/checkov-fixed-result.json || true
+            > "$CHECKOV_FIXED_JSON" 2> "$CHECKOV_FIXED_LOG" || true
 
-          if [ -f "${GITHUB_WORKSPACE}/checkov-fixed-result.json" ]; then
-            cp "${GITHUB_WORKSPACE}/checkov-fixed-result.json" "$CHECKOV_FIXED_JSON"
-          else
+          if [ ! -s "$CHECKOV_FIXED_JSON" ]; then
             echo '{"results": {"failed_checks": []}}' > "$CHECKOV_FIXED_JSON"
           fi
 
@@ -343,10 +378,16 @@ jobs:
 
           TRIVY_FIXED_JSON="$REPORTS_DIR/trivy/trivy-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.json"
 
+          rm -f "$TRIVY_FIXED_JSON"
+
           trivy config \
             --format json \
             --output "$TRIVY_FIXED_JSON" \
             "$GITHUB_WORKSPACE" || true
+
+          if [ ! -s "$TRIVY_FIXED_JSON" ]; then
+            echo '{"Results":[]}' > "$TRIVY_FIXED_JSON"
+          fi
 
           TRIVY_FAILS_AFTER=$(jq '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_FIXED_JSON" 2>/dev/null || echo 0)
 
@@ -397,6 +438,15 @@ jobs:
       merged: ${{ steps.merge.outputs.merged }}
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          echo "Pre-clean workspace: $GITHUB_WORKSPACE"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-fixed-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/.checkov" || true
+          rm -rf "$GITHUB_WORKSPACE/.external_modules" || true
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -460,6 +510,15 @@ jobs:
       TF_STATE_PATH: "/home/scan/scanners/tfstate/aws/terraform.tfstate"
 
     steps:
+      - name: Pre-clean workspace permissions
+        run: |
+          echo "Pre-clean workspace: $GITHUB_WORKSPACE"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/checkov-fixed-result.json" || true
+          rm -rf "$GITHUB_WORKSPACE/.checkov" || true
+          rm -rf "$GITHUB_WORKSPACE/.external_modules" || true
+
       - name: Checkout main after merge
         uses: actions/checkout@v4
         with:
