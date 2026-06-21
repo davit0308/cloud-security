@@ -482,8 +482,128 @@ jobs:
           git push origin --delete "fixed/${BRANCH_ID}"     || true
           echo "Đã xóa nhánh tạm: generated/${BRANCH_ID}, fixed/${BRANCH_ID}"
 
+
   # ═══════════════════════════════════════════════════════════════
-  # JOB 5 — Báo lỗi khi pipeline bị block hoàn toàn
+  # JOB 5 — Terraform Apply AWS sau khi merge vào main
+  # Giữ nguyên flow cũ: scan → triage → verify → merge.
+  # Job này chỉ chạy SAU KHI merge-to-main success.
+  # ═══════════════════════════════════════════════════════════════
+  terraform-apply-aws:
+    name: Terraform Apply AWS
+    runs-on: self-hosted
+    needs:
+      - merge-to-main
+    if: needs.merge-to-main.result == 'success'
+    timeout-minutes: 20
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+      OPENSTACK_IP: ${{ secrets.OPENSTACK_IP }}
+      TAILSCALE_AIO_IP: ${{ secrets.OPENSTACK_IP }}
+      RUNNER_CLIENT_ID: "aegis-infra-runner"
+      RUNNER_CLIENT_SECRET: ${{ secrets.RUNNER_CLIENT_SECRET }}
+
+      AWS_REGION: "ap-southeast-1"
+      TERRAFORM_AWS_DIR: "aws"
+      TF_STATE_PATH: "/home/scan/scanners/tfstate/aws/terraform.tfstate"
+
+    steps:
+      - name: Checkout main after merge
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Install required tools
+        run: |
+          terraform version
+          aws --version || true
+          jq --version || true
+          curl --version || true
+
+      - name: Get AWS credentials from AegisZero STS
+        run: |
+          if [ -z "$RUNNER_CLIENT_SECRET" ]; then
+            echo "❌ RUNNER_CLIENT_SECRET is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
+          SCRIPT_PATH="/home/scan/scanners/scripts/get_aws_credentials_ci.sh"
+
+          echo "Current workspace: $GITHUB_WORKSPACE"
+          echo "Looking for credential script at: $SCRIPT_PATH"
+
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "❌ $SCRIPT_PATH not found."
+            echo "Debug /home/scan/scanners:"
+            ls -lah /home/scan/scanners || true
+            echo "Debug /home/scan/scanners/scripts:"
+            ls -lah /home/scan/scanners/scripts || true
+            exit 1
+          fi
+
+          chmod +x "$SCRIPT_PATH"
+          "$SCRIPT_PATH"
+
+      - name: Check AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Check Terraform AWS directory
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "Terraform AWS dir: $GITHUB_WORKSPACE/$TERRAFORM_AWS_DIR"
+
+          find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -name "*.tf" -print
+
+          if [ ! -d "$GITHUB_WORKSPACE/$TERRAFORM_AWS_DIR" ]; then
+            echo "❌ Terraform AWS directory not found: $GITHUB_WORKSPACE/$TERRAFORM_AWS_DIR"
+            exit 1
+          fi
+
+      - name: Terraform init
+        working-directory: ${{ github.workspace }}/${{ env.TERRAFORM_AWS_DIR }}
+        run: |
+          mkdir -p "$(dirname "$TF_STATE_PATH")"
+
+          terraform init \
+            -backend-config="path=${TF_STATE_PATH}"
+
+      - name: Terraform validate
+        working-directory: ${{ github.workspace }}/${{ env.TERRAFORM_AWS_DIR }}
+        run: |
+          terraform fmt -check || true
+          terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ github.workspace }}/${{ env.TERRAFORM_AWS_DIR }}
+        run: |
+          terraform plan \
+            -input=false \
+            -out=tfplan
+
+      - name: Terraform apply
+        working-directory: ${{ github.workspace }}/${{ env.TERRAFORM_AWS_DIR }}
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+
+      - name: Cleanup sensitive env
+        if: always()
+        run: |
+          unset AWS_ACCESS_KEY_ID || true
+          unset AWS_SECRET_ACCESS_KEY || true
+          unset AWS_SESSION_TOKEN || true
+          unset RUNNER_CLIENT_SECRET || true
+          echo "Sensitive env cleaned"
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 6 — Báo lỗi khi pipeline bị block hoàn toàn
   # ═══════════════════════════════════════════════════════════════
   report-failure:
     name: Report Pipeline Failure
