@@ -13,9 +13,9 @@ on:
       dry_run:
         description: 'Dry run (true = chỉ quét, không remediate)'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
-        options: ['true', 'false']
+        options: ['false']
 
 concurrency:
   group: scan-${{ github.ref }}
@@ -265,7 +265,7 @@ jobs:
         env:
           ELK_USER: ${{ secrets.ELK_SSH_USER }}
         run: |
-          DRY_RUN_VALUE="${{ github.event.inputs.dry_run || 'true' }}"
+          DRY_RUN_VALUE="${{ github.event.inputs.dry_run || 'false' }}"
           BRANCH_ID_VALUE="${{ needs.pre-deployment-scan.outputs.branch_id }}"
           echo "=== KÍCH HOẠT TRIAGE TRÊN ELK VM (${{ env.ELK_IP }}) ==="
           echo "DRY_RUN mode: ${DRY_RUN_VALUE}"
