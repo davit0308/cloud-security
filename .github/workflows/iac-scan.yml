@@ -488,7 +488,7 @@ jobs:
   # Giữ nguyên flow cũ: scan → triage → verify → merge.
   # Job này chỉ chạy SAU KHI merge-to-main success.
   # ═══════════════════════════════════════════════════════════════
-  terraform-apply-aws:
+    terraform-apply-aws:
     name: Terraform Apply AWS
     runs-on: self-hosted
     needs:
@@ -521,8 +521,10 @@ jobs:
         run: |
           terraform version
           aws --version || true
+          jq --version || true
+          curl --version || true
 
-            - name: Get AWS credentials from AegisZero STS
+      - name: Get AWS credentials from AegisZero STS
         run: |
           if [ -z "$RUNNER_CLIENT_SECRET" ]; then
             echo "❌ RUNNER_CLIENT_SECRET is empty. Check GitHub Repository Secrets."
