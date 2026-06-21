@@ -522,20 +522,29 @@ jobs:
           terraform version
           aws --version || true
 
-      - name: Get AWS credentials from AegisZero STS
+            - name: Get AWS credentials from AegisZero STS
         run: |
           if [ -z "$RUNNER_CLIENT_SECRET" ]; then
             echo "❌ RUNNER_CLIENT_SECRET is empty. Check GitHub Repository Secrets."
             exit 1
           fi
 
-          if [ ! -f "scripts/get_aws_credentials_ci.sh" ]; then
-            echo "❌ scripts/get_aws_credentials_ci.sh not found."
+          SCRIPT_PATH="/home/scan/scanners/scripts/get_aws_credentials_ci.sh"
+
+          echo "Current workspace: $GITHUB_WORKSPACE"
+          echo "Looking for credential script at: $SCRIPT_PATH"
+
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "❌ $SCRIPT_PATH not found."
+            echo "Debug /home/scan/scanners:"
+            ls -lah /home/scan/scanners || true
+            echo "Debug /home/scan/scanners/scripts:"
+            ls -lah /home/scan/scanners/scripts || true
             exit 1
           fi
 
-          chmod +x scripts/get_aws_credentials_ci.sh
-          scripts/get_aws_credentials_ci.sh
+          chmod +x "$SCRIPT_PATH"
+          "$SCRIPT_PATH"
 
       - name: Check AWS identity
         run: |
