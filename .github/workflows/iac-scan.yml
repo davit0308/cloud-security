@@ -500,10 +500,12 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
 
-      TAILSCALE_AIO_IP: ${{ env.OPENSTACK_IP }}
+      OPENSTACK_IP: ${{ secrets.OPENSTACK_IP }}
+      TAILSCALE_AIO_IP: ${{ secrets.OPENSTACK_IP }}
       RUNNER_CLIENT_ID: "aegis-infra-runner"
       RUNNER_CLIENT_SECRET: ${{ secrets.RUNNER_CLIENT_SECRET }}
 
+      AWS_REGION: "ap-southeast-1"
       TERRAFORM_AWS_DIR: "aws"
       TF_STATE_PATH: "/home/scan/scanners/tfstate/aws/terraform.tfstate"
 
