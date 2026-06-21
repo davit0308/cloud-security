@@ -28,16 +28,13 @@ on:
 env:
   REPORTS_DIR: /home/scan/scanners/reports-ga
 
-  # Existing GitHub Secrets
   ELK_IP: ${{ secrets.ELK_IP }}
   SCANNER_IP: ${{ secrets.SCANNER_VM_IP }}
   OPENSTACK_IP: ${{ secrets.OPENSTACK_IP }}
 
-  # AWS deploy
   TERRAFORM_AWS_DIR: aws
   TF_STATE_PATH: /home/scan/scanners/tfstate/aws/terraform.tfstate
 
-  # AegisZero token exchange
   TAILSCALE_AIO_IP: ${{ secrets.OPENSTACK_IP }}
   RUNNER_CLIENT_ID: aegis-infra-runner
 
@@ -94,6 +91,9 @@ jobs:
           mkdir -p "$REPORTS_DIR/trivy"
           mkdir -p "$REPORTS_DIR/meta"
 
+          rm -f "$REPORTS_DIR/checkov"/*.json || true
+          rm -f "$REPORTS_DIR/trivy"/*.json || true
+
       - name: Debug Terraform files
         run: |
           echo "Workspace: $GITHUB_WORKSPACE"
@@ -104,24 +104,44 @@ jobs:
         id: checkov
         continue-on-error: true
         run: |
-          CHECKOV_JSON="$REPORTS_DIR/checkov/checkov-${{ steps.branch.outputs.branch_id }}.json"
-          CHECKOV_LOG="$REPORTS_DIR/checkov/checkov-${{ steps.branch.outputs.branch_id }}.log"
+          echo "=== CHECKOV SCAN ==="
 
-          rm -f "$CHECKOV_JSON" "$CHECKOV_LOG"
+          CHECKOV_DIR="${REPORTS_DIR}/checkov"
+          mkdir -p "$CHECKOV_DIR"
+          rm -f "$CHECKOV_DIR"/*.json || true
+
+          echo "Terraform files found:"
+          find "${GITHUB_WORKSPACE}" -name "*.tf" -print
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "${GITHUB_WORKSPACE}:/target:ro" \
+            -v "${CHECKOV_DIR}:/reports" \
             bridgecrew/checkov:latest \
             -d /target \
             --output json \
-            > "$CHECKOV_JSON" 2> "$CHECKOV_LOG" || true
+            --output-file-path /reports/ \
+            --compact \
+            --soft-fail || true
 
-          if [ ! -s "$CHECKOV_JSON" ]; then
-            echo '{"results": {"failed_checks": []}}' > "$CHECKOV_JSON"
+          echo "Checkov reports:"
+          ls -lah "$CHECKOV_DIR" || true
+
+          if [ ! -f "$CHECKOV_DIR/results_json.json" ]; then
+            echo '{"results": {"failed_checks": []}}' > "$CHECKOV_DIR/results_json.json"
           fi
 
-          CHECKOV_FAILS=$(jq '.results.failed_checks | length' "$CHECKOV_JSON" 2>/dev/null || echo 0)
+          CHECKOV_FAILS=$(python3 - << PY
+import json
+p = "${CHECKOV_DIR}/results_json.json"
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(len(data.get("results", {}).get("failed_checks", [])))
+except Exception:
+    print(0)
+PY
+)
 
           echo "Checkov fails: $CHECKOV_FAILS"
           echo "checkov_fails=$CHECKOV_FAILS" >> "$GITHUB_OUTPUT"
@@ -130,79 +150,96 @@ jobs:
         id: trivy
         continue-on-error: true
         run: |
-          TRIVY_JSON="$REPORTS_DIR/trivy/trivy-${{ steps.branch.outputs.branch_id }}.json"
+          echo "=== TRIVY SCAN ==="
 
-          rm -f "$TRIVY_JSON"
+          TRIVY_DIR="${REPORTS_DIR}/trivy"
+          mkdir -p "$TRIVY_DIR"
+          rm -f "$TRIVY_DIR"/*.json || true
 
-          trivy config \
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/target:ro" \
+            -v "${TRIVY_DIR}:/reports" \
+            aquasec/trivy:latest \
+            config /target \
             --format json \
-            --output "$TRIVY_JSON" \
-            "$GITHUB_WORKSPACE" || true
+            --output /reports/iac-terraform.json \
+            --exit-code 0 || true
 
-          if [ ! -s "$TRIVY_JSON" ]; then
-            echo '{"Results":[]}' > "$TRIVY_JSON"
+          echo "Trivy reports:"
+          ls -lah "$TRIVY_DIR" || true
+
+          if [ ! -f "$TRIVY_DIR/iac-terraform.json" ]; then
+            echo '{"Results":[]}' > "$TRIVY_DIR/iac-terraform.json"
           fi
 
-          TRIVY_FAILS=$(jq '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_JSON" 2>/dev/null || echo 0)
+          TRIVY_FAILS=$(python3 - << PY
+import json
+p = "${TRIVY_DIR}/iac-terraform.json"
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    total = 0
+    for r in data.get("Results", []):
+        total += len(r.get("Misconfigurations", []) or [])
+    print(total)
+except Exception:
+    print(0)
+PY
+)
 
           echo "Trivy fails: $TRIVY_FAILS"
           echo "trivy_fails=$TRIVY_FAILS" >> "$GITHUB_OUTPUT"
 
-      - name: Send scan reports to ELK
-        continue-on-error: true
-        env:
-          ELK_USER: ${{ secrets.ELK_SSH_USER }}
-          ELK_SSH_KEY: ${{ secrets.ELK_SSH_PRIVATE_KEY }}
+      - name: Normalize findings and push to ELK
         run: |
-          if [ -z "$ELK_IP" ]; then
-            echo "❌ ELK_IP is empty. Check GitHub Repository Secrets."
+          echo "=== NORMALIZER ON SCANNER ==="
+
+          if [ ! -d "$HOME/scanners" ]; then
+            echo "❌ $HOME/scanners not found"
             exit 1
           fi
 
-          if [ -z "$ELK_USER" ]; then
-            echo "❌ ELK_SSH_USER is empty. Check GitHub Repository Secrets."
+          if [ ! -d "$HOME/scanners/normalizer" ]; then
+            echo "❌ $HOME/scanners/normalizer not found"
+            echo "Files in $HOME/scanners:"
+            ls -lah "$HOME/scanners"
             exit 1
           fi
 
-          if [ -z "$ELK_SSH_KEY" ]; then
-            echo "❌ ELK_SSH_PRIVATE_KEY is empty. Check GitHub Repository Secrets."
+          echo "Reports before normalizer:"
+          echo "--- Checkov ---"
+          ls -lah "$REPORTS_DIR/checkov" || true
+          echo "--- Trivy ---"
+          ls -lah "$REPORTS_DIR/trivy" || true
+
+          if [ ! -f "$REPORTS_DIR/checkov/results_json.json" ]; then
+            echo "❌ Missing Checkov report: $REPORTS_DIR/checkov/results_json.json"
             exit 1
           fi
 
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "$ELK_SSH_KEY" > ~/.ssh/id_ed25519_elk
-          chmod 600 ~/.ssh/id_ed25519_elk
-          ssh-keyscan -H "$ELK_IP" >> ~/.ssh/known_hosts 2>/dev/null
+          if [ ! -f "$REPORTS_DIR/trivy/iac-terraform.json" ]; then
+            echo "❌ Missing Trivy report: $REPORTS_DIR/trivy/iac-terraform.json"
+            exit 1
+          fi
 
-          BRANCH_ID="${{ steps.branch.outputs.branch_id }}"
+          cd "$HOME/scanners"
 
-          ssh -i ~/.ssh/id_ed25519_elk \
-            -o StrictHostKeyChecking=no \
-            "${ELK_USER}@${ELK_IP}" \
-            "mkdir -p ~/elk-stack/pipeline/incoming/checkov ~/elk-stack/pipeline/incoming/trivy"
+          set -a
+          source .env
+          set +a
 
-          scp -i ~/.ssh/id_ed25519_elk \
-            -o StrictHostKeyChecking=no \
-            "$REPORTS_DIR/checkov/checkov-${BRANCH_ID}.json" \
-            "${ELK_USER}@${ELK_IP}:~/elk-stack/pipeline/incoming/checkov/checkov-${BRANCH_ID}.json"
+          export REPORTS_DIR="/home/scan/scanners/reports-ga"
+          export BRANCH_ID="${{ steps.branch.outputs.branch_id }}"
+          export CLOUD_PROVIDER="${{ vars.CLOUD_PROVIDER || 'aws' }}"
 
-          scp -i ~/.ssh/id_ed25519_elk \
-            -o StrictHostKeyChecking=no \
-            "$REPORTS_DIR/trivy/trivy-${BRANCH_ID}.json" \
-            "${ELK_USER}@${ELK_IP}:~/elk-stack/pipeline/incoming/trivy/trivy-${BRANCH_ID}.json"
+          echo "REPORTS_DIR=$REPORTS_DIR"
+          echo "BRANCH_ID=$BRANCH_ID"
+          echo "CLOUD_PROVIDER=$CLOUD_PROVIDER"
 
-          ssh -i ~/.ssh/id_ed25519_elk \
-            -o StrictHostKeyChecking=no \
-            "${ELK_USER}@${ELK_IP}" \
-            "cd ~/elk-stack/pipeline \
-             && source .env \
-             && export BRANCH_ID=${BRANCH_ID} \
-             && export CHECKOV_REPORT=~/elk-stack/pipeline/incoming/checkov/checkov-${BRANCH_ID}.json \
-             && export TRIVY_REPORT=~/elk-stack/pipeline/incoming/trivy/trivy-${BRANCH_ID}.json \
-             && {
-                  python3 -m normalizer.checkov_to_rabbitmq || true;
-                  python3 -m normalizer.trivy_to_rabbitmq || true;
-                }"
+          python3 -m normalizer.main pre_config
+
+          echo "Normalizer hoàn thành"
 
       - name: Decide scan result
         id: result
@@ -216,12 +253,14 @@ jobs:
           echo "checkov_fails=$CHECKOV_FAILS" >> "$GITHUB_OUTPUT"
           echo "trivy_fails=$TRIVY_FAILS" >> "$GITHUB_OUTPUT"
 
-          if [ "$CHECKOV_FAILS" -eq 0 ] && [ "$TRIVY_FAILS" -eq 0 ]; then
+          TOTAL_FAILS=$((CHECKOV_FAILS + TRIVY_FAILS))
+
+          if [ "$TOTAL_FAILS" -eq 0 ]; then
             echo "scan_passed=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Scan passed"
+            echo "✅ Scan PASSED"
           else
             echo "scan_passed=false" >> "$GITHUB_OUTPUT"
-            echo "❌ Scan failed: Checkov=$CHECKOV_FAILS, Trivy=$TRIVY_FAILS"
+            echo "❌ Scan FAILED — Checkov=$CHECKOV_FAILS, Trivy=$TRIVY_FAILS"
           fi
 
   triage-and-remediate:
@@ -315,6 +354,11 @@ jobs:
 
           echo "=== KIỂM TRA NHÁNH ${FIXED_BRANCH} ==="
 
+          if [ -z "$GH_PAT" ]; then
+            echo "❌ GH_PAT is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
           git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch origin 2>/dev/null || true
 
@@ -378,26 +422,38 @@ jobs:
         id: checkov-fixed
         continue-on-error: true
         run: |
-          mkdir -p "$REPORTS_DIR/checkov"
+          echo "=== CHECKOV VERIFY ==="
 
-          CHECKOV_FIXED_JSON="$REPORTS_DIR/checkov/checkov-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.json"
-          CHECKOV_FIXED_LOG="$REPORTS_DIR/checkov/checkov-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.log"
-
-          rm -f "$CHECKOV_FIXED_JSON" "$CHECKOV_FIXED_LOG"
+          CHECKOV_DIR="${REPORTS_DIR}/checkov-fixed"
+          mkdir -p "$CHECKOV_DIR"
+          rm -f "$CHECKOV_DIR"/*.json || true
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "${GITHUB_WORKSPACE}:/target:ro" \
+            -v "${CHECKOV_DIR}:/reports" \
             bridgecrew/checkov:latest \
             -d /target \
             --output json \
-            > "$CHECKOV_FIXED_JSON" 2> "$CHECKOV_FIXED_LOG" || true
+            --output-file-path /reports/ \
+            --compact \
+            --soft-fail || true
 
-          if [ ! -s "$CHECKOV_FIXED_JSON" ]; then
-            echo '{"results": {"failed_checks": []}}' > "$CHECKOV_FIXED_JSON"
+          if [ ! -f "$CHECKOV_DIR/results_json.json" ]; then
+            echo '{"results": {"failed_checks": []}}' > "$CHECKOV_DIR/results_json.json"
           fi
 
-          CHECKOV_FAILS_AFTER=$(jq '.results.failed_checks | length' "$CHECKOV_FIXED_JSON" 2>/dev/null || echo 0)
+          CHECKOV_FAILS_AFTER=$(python3 - << PY
+import json
+p = "${CHECKOV_DIR}/results_json.json"
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(len(data.get("results", {}).get("failed_checks", [])))
+except Exception:
+    print(0)
+PY
+)
 
           echo "Checkov fails after fix: $CHECKOV_FAILS_AFTER"
           echo "checkov_fails_after=$CHECKOV_FAILS_AFTER" >> "$GITHUB_OUTPUT"
@@ -406,22 +462,40 @@ jobs:
         id: trivy-fixed
         continue-on-error: true
         run: |
-          mkdir -p "$REPORTS_DIR/trivy"
+          echo "=== TRIVY VERIFY ==="
 
-          TRIVY_FIXED_JSON="$REPORTS_DIR/trivy/trivy-fixed-${{ needs.pre-deployment-scan.outputs.branch_id }}.json"
+          TRIVY_DIR="${REPORTS_DIR}/trivy-fixed"
+          mkdir -p "$TRIVY_DIR"
+          rm -f "$TRIVY_DIR"/*.json || true
 
-          rm -f "$TRIVY_FIXED_JSON"
-
-          trivy config \
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/target:ro" \
+            -v "${TRIVY_DIR}:/reports" \
+            aquasec/trivy:latest \
+            config /target \
             --format json \
-            --output "$TRIVY_FIXED_JSON" \
-            "$GITHUB_WORKSPACE" || true
+            --output /reports/iac-terraform.json \
+            --exit-code 0 || true
 
-          if [ ! -s "$TRIVY_FIXED_JSON" ]; then
-            echo '{"Results":[]}' > "$TRIVY_FIXED_JSON"
+          if [ ! -f "$TRIVY_DIR/iac-terraform.json" ]; then
+            echo '{"Results":[]}' > "$TRIVY_DIR/iac-terraform.json"
           fi
 
-          TRIVY_FAILS_AFTER=$(jq '[.Results[]?.Misconfigurations[]?] | length' "$TRIVY_FIXED_JSON" 2>/dev/null || echo 0)
+          TRIVY_FAILS_AFTER=$(python3 - << PY
+import json
+p = "${TRIVY_DIR}/iac-terraform.json"
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    total = 0
+    for r in data.get("Results", []):
+        total += len(r.get("Misconfigurations", []) or [])
+    print(total)
+except Exception:
+    print(0)
+PY
+)
 
           echo "Trivy fails after fix: $TRIVY_FAILS_AFTER"
           echo "trivy_fails_after=$TRIVY_FAILS_AFTER" >> "$GITHUB_OUTPUT"
@@ -438,12 +512,14 @@ jobs:
           echo "checkov_fails_after=$CHECKOV_FAILS_AFTER" >> "$GITHUB_OUTPUT"
           echo "trivy_fails_after=$TRIVY_FAILS_AFTER" >> "$GITHUB_OUTPUT"
 
-          if [ "$CHECKOV_FAILS_AFTER" -eq 0 ] && [ "$TRIVY_FAILS_AFTER" -eq 0 ]; then
+          TOTAL_FAILS_AFTER=$((CHECKOV_FAILS_AFTER + TRIVY_FAILS_AFTER))
+
+          if [ "$TOTAL_FAILS_AFTER" -eq 0 ]; then
             echo "rescan_passed=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Verify passed"
+            echo "✅ Verify PASSED"
           else
             echo "rescan_passed=false" >> "$GITHUB_OUTPUT"
-            echo "❌ Verify failed: Checkov=$CHECKOV_FAILS_AFTER, Trivy=$TRIVY_FAILS_AFTER"
+            echo "❌ Verify FAILED — Checkov=$CHECKOV_FAILS_AFTER, Trivy=$TRIVY_FAILS_AFTER"
           fi
 
   merge-to-main:
@@ -491,6 +567,11 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "❌ GH_PAT is empty. Check GitHub Repository Secrets."
+            exit 1
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
