@@ -3,6 +3,7 @@ name: IaC Security Scan Pipeline
 on:
   push:
     branches:
+      - "generated"
       - "generated/**"
 
   workflow_dispatch:
@@ -132,16 +133,16 @@ jobs:
           fi
 
           CHECKOV_FAILS=$(python3 - << PY
-import json
-p = "${CHECKOV_DIR}/results_json.json"
-try:
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    print(len(data.get("results", {}).get("failed_checks", [])))
-except Exception:
-    print(0)
-PY
-)
+          import json
+          p = "${CHECKOV_DIR}/results_json.json"
+          try:
+              with open(p, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              print(len(data.get("results", {}).get("failed_checks", [])))
+          except Exception:
+              print(0)
+          PY
+          )
 
           echo "Checkov fails: $CHECKOV_FAILS"
           echo "checkov_fails=$CHECKOV_FAILS" >> "$GITHUB_OUTPUT"
@@ -174,19 +175,19 @@ PY
           fi
 
           TRIVY_FAILS=$(python3 - << PY
-import json
-p = "${TRIVY_DIR}/iac-terraform.json"
-try:
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    total = 0
-    for r in data.get("Results", []):
-        total += len(r.get("Misconfigurations", []) or [])
-    print(total)
-except Exception:
-    print(0)
-PY
-)
+          import json
+          p = "${TRIVY_DIR}/iac-terraform.json"
+          try:
+              with open(p, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              total = 0
+              for r in data.get("Results", []):
+                  total += len(r.get("Misconfigurations", []) or [])
+              print(total)
+          except Exception:
+              print(0)
+          PY
+          )
 
           echo "Trivy fails: $TRIVY_FAILS"
           echo "trivy_fails=$TRIVY_FAILS" >> "$GITHUB_OUTPUT"
@@ -444,16 +445,16 @@ PY
           fi
 
           CHECKOV_FAILS_AFTER=$(python3 - << PY
-import json
-p = "${CHECKOV_DIR}/results_json.json"
-try:
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    print(len(data.get("results", {}).get("failed_checks", [])))
-except Exception:
-    print(0)
-PY
-)
+          import json
+          p = "${CHECKOV_DIR}/results_json.json"
+          try:
+              with open(p, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              print(len(data.get("results", {}).get("failed_checks", [])))
+          except Exception:
+              print(0)
+          PY
+          )
 
           echo "Checkov fails after fix: $CHECKOV_FAILS_AFTER"
           echo "checkov_fails_after=$CHECKOV_FAILS_AFTER" >> "$GITHUB_OUTPUT"
@@ -483,19 +484,19 @@ PY
           fi
 
           TRIVY_FAILS_AFTER=$(python3 - << PY
-import json
-p = "${TRIVY_DIR}/iac-terraform.json"
-try:
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    total = 0
-    for r in data.get("Results", []):
-        total += len(r.get("Misconfigurations", []) or [])
-    print(total)
-except Exception:
-    print(0)
-PY
-)
+          import json
+          p = "${TRIVY_DIR}/iac-terraform.json"
+          try:
+              with open(p, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              total = 0
+              for r in data.get("Results", []):
+                  total += len(r.get("Misconfigurations", []) or [])
+              print(total)
+          except Exception:
+              print(0)
+          PY
+          )
 
           echo "Trivy fails after fix: $TRIVY_FAILS_AFTER"
           echo "trivy_fails_after=$TRIVY_FAILS_AFTER" >> "$GITHUB_OUTPUT"
