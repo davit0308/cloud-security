@@ -48,7 +48,7 @@ resource "aws_security_group" "app_sg" {
   vpc_id      = aws_vpc.aws_hybrid_vpc.id
 
   dynamic "ingress" {
-    for_each = [80,443,22,8080]
+    for_each = [80, 443]
     content {
       description = "Port ${ingress.value} – opened via Aegis Portal"
       from_port   = ingress.value
