@@ -488,7 +488,7 @@ jobs:
   # Giữ nguyên flow cũ: scan → triage → verify → merge.
   # Job này chỉ chạy SAU KHI merge-to-main success.
   # ═══════════════════════════════════════════════════════════════
-    terraform-apply-aws:
+  terraform-apply-aws:
     name: Terraform Apply AWS
     runs-on: self-hosted
     needs:
