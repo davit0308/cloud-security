@@ -50,7 +50,7 @@ resource "aws_security_group" "app_sg" {
   dynamic "ingress" {
     for_each = [80,443,22,8080]
     content {
-      description = "Port ${ingress.value} – opened via Aegis Portal"
+      description = "Port ${ingress.value} opened via Aegis Portal"
       from_port   = ingress.value
       to_port     = ingress.value
       protocol    = "tcp"
@@ -89,7 +89,7 @@ resource "aws_instance" "app_node" {
     }
   }
 
-  iam_instance_profile = null
+  iam_instance_profile = true ? aws_iam_instance_profile.admin_profile[0].name : null
 
   tags = {
     Name        = "aegis-ec2"
@@ -100,7 +100,7 @@ resource "aws_instance" "app_node" {
 
 # ── IAM INSTANCE PROFILE ──────────────────────────────────────────────────────
 resource "aws_iam_role" "ec2_admin_role" {
-  count = 0
+  count = true ? 1 : 0
   name  = "aegis-ec2-admin-role"
 
   assume_role_policy = jsonencode({
@@ -119,13 +119,13 @@ resource "aws_iam_role" "ec2_admin_role" {
 }
 
 resource "aws_iam_role_policy_attachment" "admin_attach" {
-  count = 0
+  count      = true ? 1 : 0
   role       = aws_iam_role.ec2_admin_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
 resource "aws_iam_instance_profile" "admin_profile" {
-  count = 0
+  count = true ? 1 : 0
   name  = "aegis-admin-profile"
   role  = aws_iam_role.ec2_admin_role[0].name
 }
