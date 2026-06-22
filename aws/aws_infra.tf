@@ -89,7 +89,7 @@ resource "aws_instance" "app_node" {
     }
   }
 
-  iam_instance_profile = true ? aws_iam_instance_profile.admin_profile[0].name : null
+  iam_instance_profile = null
 
   tags = {
     Name        = "aegis-ec2"
@@ -100,7 +100,7 @@ resource "aws_instance" "app_node" {
 
 # ── IAM INSTANCE PROFILE ──────────────────────────────────────────────────────
 resource "aws_iam_role" "ec2_admin_role" {
-  count = true ? 1 : 0
+  count = 0
   name  = "aegis-ec2-admin-role"
 
   assume_role_policy = jsonencode({
@@ -119,13 +119,13 @@ resource "aws_iam_role" "ec2_admin_role" {
 }
 
 resource "aws_iam_role_policy_attachment" "admin_attach" {
-  count      = true ? 1 : 0
+  count = 0
   role       = aws_iam_role.ec2_admin_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
 resource "aws_iam_instance_profile" "admin_profile" {
-  count = true ? 1 : 0
+  count = 0
   name  = "aegis-admin-profile"
   role  = aws_iam_role.ec2_admin_role[0].name
 }
