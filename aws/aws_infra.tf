@@ -96,6 +96,11 @@ resource "aws_instance" "app_node" {
     Environment = "staging"
     ManagedBy   = "Aegis-Portal-Terraform"
   }
+
+
+  root_block_device {
+    encrypted = true
+  }
 }
 
 # ── IAM INSTANCE PROFILE ──────────────────────────────────────────────────────
